@@ -49,11 +49,11 @@ contract Bridge is BridgeStorage, Initializable, OwnableUpgradeable, UUPSUpgrade
         _;
     }
 
-    function initialize(address _validatorAddress, address _feeAccount) external initializer {
+    function initialize(address _validatorAddress, address _protocolFeeAccount) external initializer {
         __UUPSUpgradeable_init();
         __Ownable_init_unchained();
 
-        feeAccount = _feeAccount;
+        protocolFeeAccount = _protocolFeeAccount;
         validatorContract = IBridgeValidator(_validatorAddress);
     }
 
@@ -78,7 +78,7 @@ contract Bridge is BridgeStorage, Initializable, OwnableUpgradeable, UUPSUpgrade
                 address(0x0),
                 TokenStatus.Registered,
                 true,
-                5e18
+                BridgeLib.NATIVE_DEFAULT_PROTOCOL_FEE
             );
             emit TokenRegistered(_tokenId, _tokenAddress);
         } else {
@@ -87,7 +87,13 @@ contract Bridge is BridgeStorage, Initializable, OwnableUpgradeable, UUPSUpgrade
             bytes32 tokenId = BridgeLib.getTokenId(token.name(), token.symbol());
             require(tokenId == _tokenId);
 
-            tokenInfos[_tokenId] = TokenInfo(token, _tokenAddress, TokenStatus.Registered, false, 5e18);
+            tokenInfos[_tokenId] = TokenInfo(
+                token,
+                _tokenAddress,
+                TokenStatus.Registered,
+                false,
+                BridgeLib.TOKEN_DEFAULT_PROTOCOL_FEE
+            );
             emit TokenRegistered(_tokenId, _tokenAddress);
         }
     }
@@ -104,12 +110,14 @@ contract Bridge is BridgeStorage, Initializable, OwnableUpgradeable, UUPSUpgrade
         require(tokenInfos[_tokenId].status == TokenStatus.Registered, "1713");
 
         if (tokenInfos[_tokenId].native) {
+            require(msg.value > tokenInfos[_tokenId].fee, "1031");
+
             DepositData memory data = DepositData({ tokenId: _tokenId, account: msg.sender, amount: msg.value });
             deposits[_depositId] = data;
             emit BridgeDeposited(_tokenId, _depositId, data.account, data.amount, 0);
         } else {
             require(_amount % 1 gwei == 0, "1030");
-            require(_amount > tokenInfos[_tokenId].fee * 2, "1031");
+            require(_amount > tokenInfos[_tokenId].fee, "1031");
 
             BIP20DelegatedTransfer token = tokenInfos[_tokenId].token;
             if (token.delegatedTransfer(_account, address(this), _amount, _expiry, _signature)) {
@@ -130,6 +138,7 @@ contract Bridge is BridgeStorage, Initializable, OwnableUpgradeable, UUPSUpgrade
         require(tokenInfos[_tokenId].status == TokenStatus.Registered, "1713");
 
         if (tokenInfos[_tokenId].native) {
+            require(_amount > tokenInfos[_tokenId].fee, "1031");
             if (withdraws[_withdrawId].account == address(0x0)) {
                 WithdrawData memory data = WithdrawData({
                     tokenId: _tokenId,
@@ -149,14 +158,14 @@ contract Bridge is BridgeStorage, Initializable, OwnableUpgradeable, UUPSUpgrade
                 uint256 withdrawalAmount = _amount - tokenInfos[_tokenId].fee;
                 if (address(this).balance >= withdraws[_withdrawId].amount) {
                     payable(_account).transfer(withdrawalAmount);
-                    payable(feeAccount).transfer(tokenInfos[_tokenId].fee);
+                    payable(protocolFeeAccount).transfer(tokenInfos[_tokenId].fee);
                     withdraws[_withdrawId].executed = true;
                     emit BridgeWithdrawn(_tokenId, _withdrawId, _account, withdrawalAmount, 0);
                 }
             }
         } else {
             require(_amount % 1 gwei == 0, "1030");
-            require(_amount > tokenInfos[_tokenId].fee * 2, "1031");
+            require(_amount > tokenInfos[_tokenId].fee, "1031");
             BIP20DelegatedTransfer token = tokenInfos[_tokenId].token;
             if (withdraws[_withdrawId].account == address(0x0)) {
                 WithdrawData memory data = WithdrawData({
@@ -177,7 +186,7 @@ contract Bridge is BridgeStorage, Initializable, OwnableUpgradeable, UUPSUpgrade
                 uint256 withdrawalAmount = _amount - tokenInfos[_tokenId].fee;
                 if (token.balanceOf(address(this)) >= withdraws[_withdrawId].amount) {
                     token.transfer(_account, withdrawalAmount);
-                    token.transfer(feeAccount, tokenInfos[_tokenId].fee);
+                    token.transfer(protocolFeeAccount, tokenInfos[_tokenId].fee);
                     withdraws[_withdrawId].executed = true;
                     emit BridgeWithdrawn(_tokenId, _withdrawId, _account, withdrawalAmount, 0);
                 }
@@ -197,7 +206,7 @@ contract Bridge is BridgeStorage, Initializable, OwnableUpgradeable, UUPSUpgrade
             if (tokenInfos[tokenId].native) {
                 if (address(this).balance >= withdraws[_withdrawId].amount) {
                     payable(withdraws[_withdrawId].account).transfer(withdrawalAmount);
-                    payable(feeAccount).transfer(tokenInfos[tokenId].fee);
+                    payable(protocolFeeAccount).transfer(tokenInfos[tokenId].fee);
                     withdraws[_withdrawId].executed = true;
                     emit BridgeWithdrawn(tokenId, _withdrawId, withdraws[_withdrawId].account, withdrawalAmount, 0);
                 }
@@ -205,7 +214,7 @@ contract Bridge is BridgeStorage, Initializable, OwnableUpgradeable, UUPSUpgrade
                 BIP20DelegatedTransfer token = tokenInfos[tokenId].token;
                 if (token.balanceOf(address(this)) >= withdraws[_withdrawId].amount) {
                     token.transfer(withdraws[_withdrawId].account, withdrawalAmount);
-                    token.transfer(feeAccount, tokenInfos[tokenId].fee);
+                    token.transfer(protocolFeeAccount, tokenInfos[tokenId].fee);
                     withdraws[_withdrawId].executed = true;
                     emit BridgeWithdrawn(tokenId, _withdrawId, withdraws[_withdrawId].account, withdrawalAmount, 0);
                 }
@@ -244,14 +253,29 @@ contract Bridge is BridgeStorage, Initializable, OwnableUpgradeable, UUPSUpgrade
         return withdraws[_withdrawId];
     }
 
-    function getFee(bytes32 _tokenId) external view override returns (uint256) {
+    function getProtocolFee(bytes32 _tokenId) external view override returns (uint256) {
         return tokenInfos[_tokenId].fee;
     }
 
-    function changeFee(bytes32 _tokenId, uint256 _fee) external override {
+    function changeProtocolFee(bytes32 _tokenId, uint256 _fee) external override {
+        if (_tokenId == bytes32(0x00)) {
+            require(_fee <= BridgeLib.NATIVE_MAX_PROTOCOL_FEE, "1714");
+        } else {
+            require(_fee <= BridgeLib.TOKEN_MAX_PROTOCOL_FEE, "1714");
+        }
         require(tokenInfos[_tokenId].status == TokenStatus.Registered, "1713");
         require(_msgSender() == owner(), "1050");
         tokenInfos[_tokenId].fee = _fee;
+    }
+
+    function getProtocolFeeAccount() external view returns (address) {
+        return protocolFeeAccount;
+    }
+
+    function changeProtocolFeeAccount(address _protocolFeeAccount) external {
+        require(_msgSender() == protocolFeeAccount, "1050");
+
+        protocolFeeAccount = _protocolFeeAccount;
     }
 
     /// @notice 브리지를 위한 전체 유동성 자금을 조회합니다.
@@ -295,16 +319,16 @@ contract Bridge is BridgeStorage, Initializable, OwnableUpgradeable, UUPSUpgrade
         require(tokenInfos[_tokenId].status == TokenStatus.Registered, "1713");
 
         if (tokenInfos[_tokenId].native) {
-            require(liquidity[_tokenId][_msgSender()] > _amount, "1514");
-            require(address(this).balance > _amount, "1511");
+            require(liquidity[_tokenId][_msgSender()] >= _amount, "1514");
+            require(address(this).balance >= _amount, "1511");
 
             payable(_msgSender()).transfer(_amount);
             liquidity[_tokenId][_msgSender()] -= _amount;
             emit WithdrawnLiquidity(_tokenId, _msgSender(), _amount, liquidity[_tokenId][_msgSender()]);
         } else {
             BIP20DelegatedTransfer token = tokenInfos[_tokenId].token;
-            require(liquidity[_tokenId][_msgSender()] > _amount, "1514");
-            require(token.balanceOf(address(this)) > _amount, "1511");
+            require(liquidity[_tokenId][_msgSender()] >= _amount, "1514");
+            require(token.balanceOf(address(this)) >= _amount, "1511");
             require(_amount % 1 gwei == 0, "1030");
 
             token.transfer(_msgSender(), _amount);

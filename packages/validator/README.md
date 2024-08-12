@@ -1,1 +1,1 @@
-# bridge-validator
+# dms-bridge-validator

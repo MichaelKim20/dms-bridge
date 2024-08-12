@@ -19,7 +19,7 @@ interface IDeployedContract {
 
 export interface IAccount {
     deployer: Wallet;
-    fee: Wallet;
+    protocolFee: Wallet;
     bridgeValidators: Wallet[];
     users: Wallet[];
 }
@@ -40,12 +40,10 @@ export class Deployments {
         const raws = HardhatAccount.keys.map((m) => new Wallet(m, hre.ethers.provider));
         const [
             deployer,
-            fee,
+            protocolFee,
             bridgeValidator1,
             bridgeValidator2,
             bridgeValidator3,
-            bridgeValidator4,
-            bridgeValidator5,
             user01,
             user02,
             user03,
@@ -60,14 +58,8 @@ export class Deployments {
 
         this.accounts = {
             deployer,
-            fee,
-            bridgeValidators: [
-                bridgeValidator1,
-                bridgeValidator2,
-                bridgeValidator3,
-                bridgeValidator4,
-                bridgeValidator5,
-            ],
+            protocolFee,
+            bridgeValidators: [bridgeValidator1, bridgeValidator2, bridgeValidator3],
             users: [user01, user02, user03, user04, user05, user06, user07, user08, user09, user10],
         };
     }
@@ -117,7 +109,9 @@ async function deployToken(accounts: IAccount, deployment: Deployments) {
 
     await hre.changeNetwork(deployment.network);
     const factory = await hre.ethers.getContractFactory("TestLYT");
-    const contract = (await factory.connect(accounts.deployer).deploy(accounts.deployer.address)) as TestLYT;
+    const contract = (await factory
+        .connect(accounts.deployer)
+        .deploy(accounts.deployer.address, accounts.protocolFee.address)) as TestLYT;
     await contract.deployed();
     await contract.deployTransaction.wait();
 
@@ -172,7 +166,7 @@ async function deployBridge(accounts: IAccount, deployment: Deployments) {
     const factory = await hre.ethers.getContractFactory("Bridge");
     const contract = (await hre.upgrades.deployProxy(
         factory.connect(accounts.deployer),
-        [await deployment.getContractAddress("BridgeValidator"), accounts.fee.address],
+        [deployment.getContractAddress("BridgeValidator"), accounts.protocolFee.address],
         {
             initializer: "initialize",
             kind: "uups",
